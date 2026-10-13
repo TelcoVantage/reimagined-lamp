@@ -19,7 +19,7 @@
     API flow:
       1. POST /oauth/token                                             -> access_token
       2. POST /api/v2/analytics/conversations/details/query            -> conversations for the queue
-         (interval is split into 7-day windows; 100 rows per page; all pages fetched)
+         (OR filter across all configured queues; interval split into 7-day windows; all pages fetched)
       3. GET  /api/v2/speechandtextanalytics/conversations/{convId}/communications/{commId}/transcripturl
          -> pre-signed URL to the transcript JSON
       4. GET  <pre-signed url>                                         -> transcript phrases
@@ -31,7 +31,7 @@
       - recording:recording:view   (needed by the transcript URL endpoint)
 
 .NOTES
-    Edit the CONFIG block below (ClientId, ClientSecret, QueueId, OutputFolder) then run:
+    Edit the CONFIG block below (ClientId, ClientSecret, QueueIds, OutputFolder) then run:
         powershell.exe -ExecutionPolicy Bypass -File .\Export-GenesysQueueTranscripts.ps1
 #>
 
@@ -40,7 +40,11 @@
 # =====================================================================================
 $ClientId     = 'PASTE-YOUR-CLIENT-ID-HERE'
 $ClientSecret = 'PASTE-YOUR-CLIENT-SECRET-HERE'
-$QueueId      = 'PASTE-YOUR-QUEUE-ID-HERE'          # GUID of the queue
+# One or more queue GUIDs. Conversations that touched ANY of these queues are exported.
+$QueueIds     = @(
+    'PASTE-QUEUE-ID-1-HERE',
+    'PASTE-QUEUE-ID-2-HERE'
+)
 $OutputFolder = 'C:\Temp\GenesysTranscripts'        # created if missing
 
 # How many previous calendar months to include in addition to the current month.
@@ -275,6 +279,11 @@ while ($windowStart -lt $monthEnd) {
     $pageNumber = 1
     while ($true) {
 
+        $queuePredicates = @()
+        foreach ($q in $QueueIds) {
+            $queuePredicates += @{ 'type' = 'dimension'; 'dimension' = 'queueId'; 'operator' = 'matches'; 'value' = $q }
+        }
+
         $query = @{
             'interval'       = $interval
             'order'          = 'asc'
@@ -283,9 +292,7 @@ while ($windowStart -lt $monthEnd) {
             'segmentFilters' = @(
                 @{
                     'type'       = 'or'
-                    'predicates' = @(
-                        @{ 'type' = 'dimension'; 'dimension' = 'queueId'; 'operator' = 'matches'; 'value' = $QueueId }
-                    )
+                    'predicates' = $queuePredicates
                 }
             )
         }
@@ -321,10 +328,10 @@ foreach ($c in $conversations) {
     }
 }
 
-Write-Host ('Total unique conversations for queue ' + $QueueId + ': ' + $uniqueConversations.Count)
+Write-Host ('Total unique conversations across ' + $QueueIds.Count + ' queue(s): ' + $uniqueConversations.Count)
 
 if ($uniqueConversations.Count -eq 0) {
-    Write-Warning 'No conversations found for this queue in the period. Nothing to export.'
+    Write-Warning 'No conversations found for these queues in the period. Nothing to export.'
     return
 }
 
@@ -342,7 +349,21 @@ foreach ($conv in $uniqueConversations) {
     $convEnd        = [string]$conv.conversationEnd
     $direction      = [string]$conv.originatingDirection
 
-    Write-Host ('[' + $convIndex + '/' + $uniqueConversations.Count + '] ' + $conversationId)
+    # Which of the configured queues did this conversation actually touch? (from ACD segments)
+    $touchedQueues = @()
+    foreach ($p in @($conv.participants)) {
+        foreach ($s in @($p.sessions)) {
+            foreach ($seg in @($s.segments)) {
+                $segQueue = [string]$seg.queueId
+                if ($segQueue -ne '' -and $QueueIds -contains $segQueue -and $touchedQueues -notcontains $segQueue) {
+                    $touchedQueues += $segQueue
+                }
+            }
+        }
+    }
+    $queueIdText = $touchedQueues -join ';'
+
+    Write-Host ('[' + $convIndex + '/' + $uniqueConversations.Count + '] ' + $conversationId + '  queue(s): ' + $queueIdText)
 
     # Collect candidate communication (session) IDs.
     # Transcripts hang off the customer/external communication; agent sessions are a fallback.
@@ -428,7 +449,7 @@ foreach ($conv in $uniqueConversations) {
                         'ConversationStart' = $convStart
                         'ConversationEnd'   = $convEnd
                         'Direction'         = $direction
-                        'QueueId'           = $QueueId
+                        'QueueId'           = $queueIdText
                         'MediaType'         = [string]$transcriptDoc.mediaType
                         'CommunicationId'   = $commId
                         'TranscriptId'      = $transcriptId
@@ -448,7 +469,7 @@ foreach ($conv in $uniqueConversations) {
                     'ConversationStart' = $convStart
                     'ConversationEnd'   = $convEnd
                     'Direction'         = $direction
-                    'QueueId'           = $QueueId
+                    'QueueId'           = $queueIdText
                     'MediaType'         = [string]$transcriptDoc.mediaType
                     'CommunicationId'   = $commId
                     'TranscriptId'      = $transcriptId
@@ -470,7 +491,7 @@ foreach ($conv in $uniqueConversations) {
             'ConversationStart' = $convStart
             'ConversationEnd'   = $convEnd
             'Direction'         = $direction
-            'QueueId'           = $QueueId
+            'QueueId'           = $queueIdText
             'MediaType'         = ''
             'CommunicationId'   = ''
             'TranscriptId'      = ''
@@ -482,8 +503,11 @@ foreach ($conv in $uniqueConversations) {
 }
 
 # ---- Step 3: export -----------------------------------------------------------------
-$phraseFile  = Join-Path -Path $OutputFolder -ChildPath ('Transcripts_Phrases_' + $monthLabel + '_' + $QueueId + '.csv')
-$summaryFile = Join-Path -Path $OutputFolder -ChildPath ('Transcripts_Summary_' + $monthLabel + '_' + $QueueId + '.csv')
+$queueTag = 'MultiQueue'
+if ($QueueIds.Count -eq 1) { $queueTag = [string]$QueueIds[0] }
+
+$phraseFile  = Join-Path -Path $OutputFolder -ChildPath ('Transcripts_Phrases_' + $monthLabel + '_' + $queueTag + '.csv')
+$summaryFile = Join-Path -Path $OutputFolder -ChildPath ('Transcripts_Summary_' + $monthLabel + '_' + $queueTag + '.csv')
 
 # -Property hashtables do not preserve key order, so fix the column order explicitly.
 $phraseRows |
