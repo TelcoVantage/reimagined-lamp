@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Exports all Genesys Cloud transcripts for a queue (last calendar month) to CSV.
+    Exports all Genesys Cloud transcripts for a queue (current month + previous N months) to CSV.
 
 .DESCRIPTION
     Region   : Australia (ap-southeast-2)  ->  login.mypurecloud.com.au / api.mypurecloud.com.au
     Auth     : OAuth2 Client Credentials grant (Client ID + Secret embedded below)
-    Period   : Previous calendar month, local time, converted to UTC for the API
+    Period   : Current month plus the previous N months ($PreviousMonths), local time -> UTC
     Platform : Windows PowerShell 5.1 running in Constrained Language Mode (CLM)
 
     CLM rules honoured by this script:
@@ -42,6 +42,11 @@ $ClientId     = 'PASTE-YOUR-CLIENT-ID-HERE'
 $ClientSecret = 'PASTE-YOUR-CLIENT-SECRET-HERE'
 $QueueId      = 'PASTE-YOUR-QUEUE-ID-HERE'          # GUID of the queue
 $OutputFolder = 'C:\Temp\GenesysTranscripts'        # created if missing
+
+# How many previous calendar months to include in addition to the current month.
+#   2 = current month + the 2 months before it (e.g. run on 13 Oct -> 1 Aug 00:00 to now)
+#   0 = current month only
+$PreviousMonths = 2
 
 # Australia (Sydney) region endpoints
 $LoginBase = 'https://login.mypurecloud.com.au'
@@ -242,13 +247,14 @@ if (-not (Test-Path -Path $OutputFolder)) {
     New-Item -Path $OutputFolder -ItemType Directory | Out-Null
 }
 
-# ---- Date range: previous calendar month (local), converted to UTC ------------------
+# ---- Date range: current month + $PreviousMonths earlier months (local), to UTC -----
+$now              = Get-Date
 $firstOfThisMonth = Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0 -Millisecond 0
-$monthStart       = $firstOfThisMonth.AddMonths(-1)
-$monthEnd         = $firstOfThisMonth
-$monthLabel       = $monthStart.ToString('yyyy-MM')
+$monthStart       = $firstOfThisMonth.AddMonths(-1 * $PreviousMonths)
+$monthEnd         = $now                       # up to the moment the script runs
+$monthLabel       = $monthStart.ToString('yyyy-MM') + '_to_' + $now.ToString('yyyy-MM-dd')
 
-Write-Host ('Period (local): ' + $monthStart.ToString('yyyy-MM-dd') + ' to ' + $monthEnd.ToString('yyyy-MM-dd') + ' (exclusive)')
+Write-Host ('Period (local): ' + $monthStart.ToString('yyyy-MM-dd') + ' to ' + $monthEnd.ToString('yyyy-MM-dd HH:mm'))
 Write-Host ('Period (UTC)  : ' + (Format-GenesysUtc -Value $monthStart) + ' / ' + (Format-GenesysUtc -Value $monthEnd))
 
 # ---- Auth ---------------------------------------------------------------------------
